@@ -75,3 +75,6 @@ In case you're having any issues, refer to [Connection Guide](https://developer.
 
 ## Credits
 This app is an experiment by Kaash Dev Seetohul.
+
+My dad had bought a new Samsung TV. Every option on the app store to stream m3u8/hls required a paid subscription, so I decided to learn some web dev and made my own app lol.
+
