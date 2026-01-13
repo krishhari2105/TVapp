@@ -72,3 +72,39 @@ video::-webkit-media-controls-fullscreen-button {
     display: none; /* Hidden by default */
     z-index: 1000; /* Ensure it’s on top of other content */
   }
+
+  #channelList {
+    position: fixed;
+    top: 0;
+    right: 0;
+    width: 300px;
+    height: 100%;
+    background-color: rgba(0, 0, 0, 0.8);
+    color: white;
+    z-index: 2000;
+    overflow-y: auto;
+    transition: transform 0.3s ease;
+}
+
+#channelList.hidden {
+    transform: translateX(100%);
+}
+
+#listContainer {
+    list-style: none;
+    padding: 20px;
+    margin: 0;
+}
+
+.channel-item {
+    padding: 15px;
+    font-size: 22px;
+    border-bottom: 1px solid #333;
+    cursor: pointer;
+}
+
+.channel-item.focused {
+    background-color: #fff;
+    color: #000;
+    font-weight: bold;
+}

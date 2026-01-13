@@ -1,0 +1,91 @@
+# Project type [web_app, test_runner]
+project_type: web_app
+
+# Default profile, Tizen API version
+profile: tv-samsung
+api_version: "2.3"
+
+# Build type [Debug/ Release/ Test]
+build_type: Debug
+
+# Output name for application
+output_name: TVapp
+
+# Output path for build
+output_path: ""
+
+# Enable size optimization of wgt for web workspace
+opt: false
+
+# Signing profile to be used for Tizen package signing
+# If value is empty: "", active signing profile will be used
+# Else If value is ".", default signing profile will be used
+signing_profile: ""
+
+# list of certs in web project (.trust-anchor)
+trust_anchor: []
+
+# list of files in web project (.html,.css etc) and resources
+files:
+  - .git/FETCH_HEAD
+  - .git/HEAD
+  - .git/ORIG_HEAD
+  - .git/config
+  - .git/description
+  - .git/hooks/applypatch-msg.sample
+  - .git/hooks/commit-msg.sample
+  - .git/hooks/fsmonitor-watchman.sample
+  - .git/hooks/post-update.sample
+  - .git/hooks/pre-applypatch.sample
+  - .git/hooks/pre-commit.sample
+  - .git/hooks/pre-merge-commit.sample
+  - .git/hooks/pre-push.sample
+  - .git/hooks/pre-rebase.sample
+  - .git/hooks/pre-receive.sample
+  - .git/hooks/prepare-commit-msg.sample
+  - .git/hooks/push-to-checkout.sample
+  - .git/hooks/sendemail-validate.sample
+  - .git/hooks/update.sample
+  - .git/index
+  - .git/info/exclude
+  - .git/logs/HEAD
+  - .git/logs/refs/heads/main
+  - .git/logs/refs/remotes/origin/HEAD
+  - .git/objects/pack/pack-38b614beea8a85666f1bde0ee59f9c31df6d2ab5.idx
+  - .git/objects/pack/pack-38b614beea8a85666f1bde0ee59f9c31df6d2ab5.pack
+  - .git/objects/pack/pack-38b614beea8a85666f1bde0ee59f9c31df6d2ab5.rev
+  - .git/packed-refs
+  - .git/refs/heads/main
+  - .git/refs/remotes/origin/HEAD
+  - css/style.css
+  - icon.png
+  - images/tizen_32.png
+  - index.html
+  - js/main.js
+  - noun-live-tv-3548799.png
+
+# list of files to exclude based on the matched patterns
+excludes:
+  - .Build/*
+  - .buildResult/*
+  - .csproj
+  - .externalToolBuilders/*
+  - .gn
+  - .obj/*
+  - .package/*
+  - .project
+  - .rds_delta
+  - .sdk_delta.info
+  - .settings/*
+  - .sign/*
+  - .tizen-ui-builder-tool.xml
+  - .tproject
+  - .wgt
+  - Build/*
+  - Debug/*
+  - Directory.Build.targets
+  - webUnitTest/*
+
+# project dependencies
+deps: []
+
