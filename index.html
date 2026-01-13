@@ -2,15 +2,22 @@
 <html>
 <head>
     <meta charset="UTF-8">
-    <title>HLS Video Player</title>
+    <title>TVapp - Shaka Player</title>
+    <link rel="stylesheet" type="text/css" href="https://cdn.jsdelivr.net/npm/shaka-player@4.7.11/dist/controls.css">
     <link rel="stylesheet" type="text/css" href="css/style.css">
 </head>
 <body>
-	<script src="https://cdn.jsdelivr.net/npm/hls.js@latest"></script>
-    <video id="videoPlayer" autoplay></video>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/mux.js/6.3.0/mux.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/shaka-player@4.7.11/dist/shaka-player.ui.js"></script>
+
+    <div id="videoContainer" style="width:100%; height:100%; background-color: black;">
+        <video id="videoPlayer" autoplay style="width:100%; height:100%;"></video>
+    </div>
+
     <div id="channelList" class="hidden">
         <ul id="listContainer"></ul>
     </div>
+
     <script src="js/main.js"></script>
 </body>
 </html>
