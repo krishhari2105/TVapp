@@ -35,9 +35,20 @@ document.addEventListener('DOMContentLoaded', function() {
         console.log('Total Channels Loaded:', channels.length);
         rebuildUIList();
         
-        // Initial load: Start with the first channel
+        // --- AUTO-PLAY SUN TV ON STARTUP ---
         if (channels.length > 0) {
-            loadChannel(0);
+            // Find Sun TV (case-insensitive search)
+            const sunTvIndex = channels.findIndex(ch => 
+                ch.name && ch.name.toLowerCase().includes('sun tv')
+            );
+
+            if (sunTvIndex !== -1) {
+                console.log('Found Sun TV at index:', sunTvIndex);
+                loadChannel(sunTvIndex);
+            } else {
+                console.log('Sun TV not found, loading first channel instead.');
+                loadChannel(0);
+            }
         }
     }
 
@@ -81,19 +92,17 @@ document.addEventListener('DOMContentLoaded', function() {
             player = new shaka.Player();
             await player.attach(video);
             
-            // 2. FIXED SHAKA CONFIG (Removed problematic gapJumping)
+            // 2. UPDATED SHAKA CONFIG (v4.7 Compatible)
             player.configure({
                 streaming: {
-                    // This handles most gaps automatically in Shaka 4.x
+                    // This is the correct key for v4.7 to handle stream gaps
                     gapDetectionThreshold: 0.5,
+                    // Optional: Checks for gaps every 250ms
                     gapJumpTimerTime: 0.25
                 }
             });
 
-            // Fallback for mediaSource config if needed
-            try {
-                player.configure('mediaSource.forceTransmux', true);
-            } catch(e) { console.log('forceTransmux not supported in this build'); }
+            // Removed forceTransmux as requested
 
             ui = new shaka.ui.Overlay(player, videoContainer, video);
             ui.configure({ 
