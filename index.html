@@ -8,14 +8,67 @@
 </head>
 <body>
     <script src="https://cdnjs.cloudflare.com/ajax/libs/mux.js/6.3.0/mux.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/hls.js@1.5.20/dist/hls.min.js"></script>
     <script src="https://cdn.jsdelivr.net/npm/shaka-player@4.7.11/dist/shaka-player.ui.js"></script>
 
-    <div id="videoContainer" style="width:100%; height:100%; background-color: black;">
+    <div id="homeScreen">
+        <div class="home-shell">
+            <div class="home-header">
+                <h1 id="homeTitle">Playlists</h1>
+                <p id="homeHint">Add an M3U URL and open any saved playlist.</p>
+            </div>
+
+            <ul id="playlistList"></ul>
+            <input
+                id="playlistUrlInput"
+                type="url"
+                placeholder="https://example.com/playlist.m3u"
+                autocomplete="off"
+                spellcheck="false"
+            >
+        </div>
+    </div>
+
+    <div id="videoContainer" class="hidden" style="width:100%; height:100%; background-color: black;">
         <video id="videoPlayer" autoplay style="width:100%; height:100%;"></video>
     </div>
 
     <div id="channelList" class="hidden">
         <ul id="listContainer"></ul>
+    </div>
+
+    <div id="playerOptions" class="hidden">
+        <div class="player-options-panel">
+            <div class="player-options-header">
+                <h2>Player Options</h2>
+                <p id="playerOptionsHint">Quality and audio options are available only for HLS.js playback.</p>
+            </div>
+            <ul id="playerOptionsList"></ul>
+            <div id="playerOptionsDropdown" class="hidden">
+                <div class="player-options-dropdown-header">
+                    <h3 id="playerOptionsDropdownTitle">Select Option</h3>
+                    <p>Press OK to choose. Back closes.</p>
+                </div>
+                <ul id="playerOptionsDropdownList"></ul>
+            </div>
+        </div>
+    </div>
+
+    <div id="channelSearch" class="hidden">
+        <div class="channel-search-panel">
+            <div class="channel-search-header">
+                <h2>Search Channels</h2>
+                <p>Type to filter. OK opens the selected result. Back closes.</p>
+            </div>
+            <input
+                id="channelSearchInput"
+                type="text"
+                placeholder="Search channel name"
+                autocomplete="off"
+                spellcheck="false"
+            >
+            <ul id="channelSearchResults"></ul>
+        </div>
     </div>
 
     <script src="js/main.js"></script>
