@@ -7,6 +7,7 @@
     <link rel="stylesheet" type="text/css" href="css/style.css">
 </head>
 <body>
+    <script src="$WEBAPIS/webapis/webapis.js"></script>
     <script src="https://cdnjs.cloudflare.com/ajax/libs/mux.js/6.3.0/mux.min.js"></script>
     <script src="https://cdn.jsdelivr.net/npm/hls.js@1.5.20/dist/hls.min.js"></script>
     <script src="https://cdn.jsdelivr.net/npm/shaka-player@4.7.11/dist/shaka-player.ui.js"></script>
@@ -33,6 +34,8 @@
         <video id="videoPlayer" autoplay style="width:100%; height:100%;"></video>
     </div>
 
+    <!-- <div id="subtitleOverlay" aria-live="polite"></div> -->
+
     <div id="channelList" class="hidden">
         <ul id="listContainer"></ul>
     </div>
@@ -41,7 +44,7 @@
         <div class="player-options-panel">
             <div class="player-options-header">
                 <h2>Player Options</h2>
-                <p id="playerOptionsHint">Quality and audio options are available only for HLS.js playback.</p>
+                <p id="playerOptionsHint">Audio, quality, and subtitle options appear when available.</p>
             </div>
             <ul id="playerOptionsList"></ul>
             <div id="playerOptionsDropdown" class="hidden">

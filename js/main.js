@@ -21,6 +21,7 @@ document.addEventListener('DOMContentLoaded', function() {
     var player;
     var ui;
     var hlsPlayer = null;
+    var avPlayState = 'NONE';
     var channels = [];
     var playlists = [];
     var favorites = [];
@@ -37,6 +38,7 @@ document.addEventListener('DOMContentLoaded', function() {
     var focusedPlayerOptionIndex = 0;
     var isPlayerOptionsDropdownVisible = false;
     var focusedPlayerDropdownIndex = 0;
+    var playerOptionsRefreshTimer = null;
     var homePlaylistActionMode = 'open';
     var activeLoadRequestId = 0;
     var isChannelLoading = false;
@@ -45,6 +47,12 @@ document.addEventListener('DOMContentLoaded', function() {
     var searchResults = [];
     var focusedSearchIndex = 0;
     var searchFocusArea = 'input';
+    var activeSubtitleValue = 'Off';
+    var hlsSubtitleManifestCache = {};
+    var textTrackRegistry = [];
+    var textTrackSequence = 0;
+    var currentLoadInitialTextTracks = [];
+    var useFreshSubtitleSessionOnNextPlaybackStart = false;
 
     var PLAYLIST_STORAGE_KEY = 'tvapp.playlists';
     var FAVORITES_STORAGE_KEY = 'tvapp.favorites';
@@ -54,6 +62,21 @@ document.addEventListener('DOMContentLoaded', function() {
             id: createId(),
             name: 'playlist.php',
             url: 'http://192.168.1.3:8080/JioTv/playlist.php'
+        },
+        {
+            id: createId(),
+            name: 'play',
+            url: 'http://192.168.1.3:8080/play.m3u'
+        },
+        {
+            id: createId(),
+            name: 'strms',
+            url: 'http://192.168.1.3:8080/strms.m3u'
+        },
+        {
+            id: createId(),
+            name: 'tam',
+            url: 'https://iptv-org.github.io/iptv/languages/tam.m3u'
         }
     ];
 
@@ -369,6 +392,7 @@ document.addEventListener('DOMContentLoaded', function() {
             name: channel.name || 'Unknown Channel',
             logo: channel.logo || null,
             url: channel.url,
+            subtitles: Array.isArray(channel.subtitles) ? channel.subtitles : [],
             playlistId: playlist.id,
             playlistName: playlist.name
         };
@@ -441,6 +465,28 @@ document.addEventListener('DOMContentLoaded', function() {
         var lines = data.split('\n');
         var currentChannel = {};
 
+        function parseSubtitleAttributeValue(value) {
+            return String(value || '')
+                .split(/[;,]/)
+                .map(function(part) { return part.trim(); })
+                .filter(Boolean)
+                .map(function(part, index) {
+                    var pieces = part.split('|').map(function(item) { return item.trim(); }).filter(Boolean);
+                    var url = pieces[0];
+                    if (!url || !/^https?:\/\//i.test(url)) {
+                        return null;
+                    }
+                    return {
+                        id: 'ext-sub-' + index,
+                        label: pieces[1] || ('Subtitle ' + (index + 1)),
+                        language: pieces[2] || '',
+                        codec: (pieces[3] || url.split('.').pop() || 'vtt').toLowerCase(),
+                        url: url
+                    };
+                })
+                .filter(Boolean);
+        }
+
         lines.forEach(function(rawLine) {
             var line = rawLine.trim();
             if (line.startsWith('#EXTINF')) {
@@ -449,11 +495,29 @@ document.addEventListener('DOMContentLoaded', function() {
 
                 var logoMatch = line.match(/tvg-logo="([^"]+)"/);
                 currentChannel.logo = logoMatch ? logoMatch[1] : null;
+                currentChannel.subtitles = [];
+
+                [
+                    'subtitles',
+                    'subtitle-url',
+                    'subtitle_url',
+                    'sub-url',
+                    'sub_file',
+                    'sub-file',
+                    'tvg-subtitle'
+                ].forEach(function(attrName) {
+                    var pattern = new RegExp(attrName + '="([^"]+)"', 'i');
+                    var match = line.match(pattern);
+                    if (match && match[1]) {
+                        currentChannel.subtitles = currentChannel.subtitles.concat(parseSubtitleAttributeValue(match[1]));
+                    }
+                });
             } else if (line.startsWith('http')) {
                 currentChannel.url = line.split('|')[0];
                 parsedChannels.push({
                     name: currentChannel.name || 'Unknown Channel',
                     logo: currentChannel.logo || null,
+                    subtitles: currentChannel.subtitles || [],
                     url: currentChannel.url
                 });
                 currentChannel = {};
@@ -539,17 +603,28 @@ document.addEventListener('DOMContentLoaded', function() {
         ) {
             return 'application/x-mpegurl';
         }
+        if (normalizedUrl.includes('.ts')) {
+            return 'video/mp2t';
+        }
         return undefined;
     }
 
     function getStreamType(url) {
         var normalizedUrl = String(url || '').toLowerCase();
         if (
+            normalizedUrl.includes('jmp2.uk/') ||
+            normalizedUrl.includes('pluto.tv/') ||
+            normalizedUrl.includes('stitcher-ipv4.pluto.tv/')
+        ) {
+            return 'hls-stitch';
+        }
+        if (normalizedUrl.includes('live.php') || normalizedUrl.includes('wanda.php')) {
+            return 'hls-wrapper';
+        }
+        if (
             normalizedUrl.includes('.m3u8') ||
             normalizedUrl.includes('.m3u') ||
-            normalizedUrl.includes('live.php') ||
-            normalizedUrl.includes('playlist.php') ||
-            normalizedUrl.includes('wanda.php')
+            normalizedUrl.includes('playlist.php')
         ) {
             return 'hls';
         }
@@ -562,12 +637,109 @@ document.addEventListener('DOMContentLoaded', function() {
         return 'unknown';
     }
 
+    async function detectHlsSubtitleMetadata(channelUrl) {
+        if (!channelUrl) {
+            return false;
+        }
+
+        if (Object.prototype.hasOwnProperty.call(hlsSubtitleManifestCache, channelUrl)) {
+            return hlsSubtitleManifestCache[channelUrl];
+        }
+
+        try {
+            var response = await fetch(channelUrl, { method: 'GET' });
+            if (!response.ok) {
+                hlsSubtitleManifestCache[channelUrl] = false;
+                return false;
+            }
+
+            var manifestText = await response.text();
+            var hasSubtitleGroupReference = /#EXT-X-STREAM-INF:.*SUBTITLES\s*=\s*(?:"[^"]+"|[^,\s]+)/i.test(manifestText);
+            var hasClosedCaptionGroupReference = /#EXT-X-STREAM-INF:.*CLOSED-CAPTIONS\s*=\s*(?:"(?!NONE")[^"]+"|(?!NONE\b)[^,\s]+)/i.test(manifestText);
+            var hasSubtitleMetadata =
+                /#EXT-X-MEDIA:.*TYPE=SUBTITLES/i.test(manifestText) ||
+                /#EXT-X-MEDIA:.*TYPE=CLOSED-CAPTIONS/i.test(manifestText) ||
+                hasSubtitleGroupReference ||
+                hasClosedCaptionGroupReference;
+
+            hlsSubtitleManifestCache[channelUrl] = hasSubtitleMetadata;
+            return hasSubtitleMetadata;
+        } catch (error) {
+            hlsSubtitleManifestCache[channelUrl] = false;
+            return false;
+        }
+    }
+
     function destroyHlsPlayer() {
         if (hlsPlayer) {
             hlsPlayer.destroy();
             hlsPlayer = null;
         }
-        currentPlaybackEngine = null;
+    }
+
+    function hasAvPlay() {
+        return !!(window.webapis && webapis.avplay);
+    }
+
+    function setAvPlayMode(active) {
+        document.body.classList.toggle('avplay-active', !!active);
+        videoContainer.classList.toggle('avplay-active', !!active);
+    }
+
+    function hideHtmlVideoElement() {
+        video.style.visibility = 'hidden';
+    }
+
+    function showHtmlVideoElement() {
+        video.style.visibility = 'visible';
+    }
+
+    function getVideoDisplayRect() {
+        var rect = videoContainer.getBoundingClientRect();
+        return {
+            left: Math.max(0, Math.round(rect.left)),
+            top: Math.max(0, Math.round(rect.top)),
+            width: Math.max(1, Math.round(rect.width || window.innerWidth || 1920)),
+            height: Math.max(1, Math.round(rect.height || window.innerHeight || 1080))
+        };
+    }
+
+    function updateAvPlayDisplayRect() {
+        if (!hasAvPlay() || avPlayState === 'NONE') {
+            return;
+        }
+
+        var rect = getVideoDisplayRect();
+        try {
+            webapis.avplay.setDisplayRect(rect.left, rect.top, rect.width, rect.height);
+        } catch (error) {
+            console.warn('AVPlay setDisplayRect failed:', error);
+        }
+    }
+
+    function stopAvPlay() {
+        if (!hasAvPlay() || avPlayState === 'NONE') {
+            setAvPlayMode(false);
+            return;
+        }
+
+        try {
+            if (avPlayState === 'PLAYING' || avPlayState === 'PAUSED') {
+                webapis.avplay.stop();
+            }
+        } catch (error) {
+            console.warn('AVPlay stop failed:', error);
+        }
+
+        try {
+            webapis.avplay.close();
+        } catch (error) {
+            console.warn('AVPlay close failed:', error);
+        }
+
+        avPlayState = 'NONE';
+        setAvPlayMode(false);
+        showHtmlVideoElement();
     }
 
     function isStaleLoad(requestId) {
@@ -603,6 +775,17 @@ document.addEventListener('DOMContentLoaded', function() {
     }
 
     function getCurrentAudioText() {
+        if (currentPlaybackEngine && currentPlaybackEngine.indexOf('avplay') === 0) {
+            var avPlayAudioTracks = getAvPlayAudioTracks();
+            if (!avPlayAudioTracks.length) {
+                return 'Unavailable';
+            }
+            var selectedAvPlayAudio = avPlayAudioTracks.find(function(track) {
+                return track.index === getAvPlaySelectedTrackIndex('AUDIO');
+            }) || avPlayAudioTracks[0];
+            return selectedAvPlayAudio.label;
+        }
+
         if (!hlsPlayer || !hlsPlayer.audioTracks || !hlsPlayer.audioTracks.length) {
             return 'Unavailable';
         }
@@ -615,26 +798,593 @@ document.addEventListener('DOMContentLoaded', function() {
         return track.name || track.lang || ('Track ' + (hlsPlayer.audioTrack + 1));
     }
 
-    function buildPlayerOptionItems() {
-        if (currentPlaybackEngine !== 'hls.js' || !hlsPlayer) {
+    function getCurrentSubtitleText() {
+        var tracks = getNativeSubtitleTracks();
+        var active = tracks.find(function(t) { return t.value === activeSubtitleValue; });
+        return active ? active.label : 'Off';
+    }
+
+    function resetSubtitleTrackingState() {
+        textTrackRegistry = [];
+        currentLoadInitialTextTracks = [];
+        activeSubtitleValue = 'Off';
+    }
+
+    function pruneTextTrackRegistry() {
+        if (!video || !video.textTracks) {
+            textTrackRegistry = [];
+            return;
+        }
+
+        var currentTracks = [];
+        for (var i = 0; i < video.textTracks.length; i++) {
+            currentTracks.push(video.textTracks[i]);
+        }
+
+        textTrackRegistry = textTrackRegistry.filter(function(entry) {
+            return currentTracks.indexOf(entry.track) !== -1;
+        });
+    }
+
+    function isTrackBackedByDomNode(track) {
+        if (!video) {
+            return false;
+        }
+
+        var trackNodes = video.querySelectorAll('track');
+        for (var i = 0; i < trackNodes.length; i++) {
+            if (trackNodes[i].track === track) {
+                return true;
+            }
+        }
+
+        return false;
+    }
+
+    function captureInitialTextTracksForLoad() {
+        currentLoadInitialTextTracks = [];
+        if (!video || !video.textTracks) {
+            return;
+        }
+
+        for (var i = 0; i < video.textTracks.length; i++) {
+            currentLoadInitialTextTracks.push(video.textTracks[i]);
+        }
+    }
+
+    function observeCurrentDomTextTracks(reason) {
+        if (!video || !video.textTracks) {
+            return false;
+        }
+
+        var changed = false;
+
+        for (var i = 0; i < video.textTracks.length; i++) {
+            var track = video.textTracks[i];
+            if (isTrackBackedByDomNode(track)) {
+                continue;
+            }
+
+            if (getTextTrackLoadId(track) !== -1) {
+                continue;
+            }
+
+            if (currentLoadInitialTextTracks.indexOf(track) !== -1) {
+                continue;
+            }
+
+            registerTextTrack(track, activeLoadRequestId);
+            if (isEmbeddedCaptionTrack(track)) {
+                setTextTrackSource(track, 'embedded');
+            } else if (doesDomTextTrackMatchAnyHlsManifestTrack(track)) {
+                setTextTrackSource(track, 'hls');
+            }
+
+            changed = true;
+        }
+
+        return changed;
+    }
+
+    function getTextTrackMeta(track) {
+        for (var i = 0; i < textTrackRegistry.length; i++) {
+            if (textTrackRegistry[i].track === track) {
+                return textTrackRegistry[i];
+            }
+        }
+        return null;
+    }
+
+    function registerTextTrack(track, loadId) {
+        if (!track) {
+            return null;
+        }
+
+        var meta = getTextTrackMeta(track);
+        if (meta) {
+            meta.loadId = loadId;
+            return meta;
+        }
+
+        meta = {
+            track: track,
+            loadId: loadId,
+            sourceType: 'unknown',
+            sequence: ++textTrackSequence
+        };
+        textTrackRegistry.push(meta);
+        return meta;
+    }
+
+    function setTextTrackSource(track, sourceType) {
+        var meta = registerTextTrack(track, getTextTrackLoadId(track) === -1 ? activeLoadRequestId : getTextTrackLoadId(track));
+        if (!meta) {
+            return null;
+        }
+
+        meta.sourceType = sourceType;
+        return meta;
+    }
+
+    function getTextTrackSource(track) {
+        var meta = getTextTrackMeta(track);
+        return meta ? meta.sourceType : 'unknown';
+    }
+
+    function getTextTrackLoadId(track) {
+        var meta = getTextTrackMeta(track);
+        return meta ? meta.loadId : -1;
+    }
+
+    function markExistingTextTracksAsStale(loadId) {
+        if (!video || !video.textTracks) {
+            return;
+        }
+
+        pruneTextTrackRegistry();
+        for (var i = 0; i < video.textTracks.length; i++) {
+            var meta = registerTextTrack(video.textTracks[i], loadId - 1);
+            if (meta) {
+                meta.sourceType = 'unknown';
+            }
+        }
+    }
+
+    function getSubtitleLabel(label, fallback) {
+        var normalizedLabel = String(label || '').trim();
+        return normalizedLabel || fallback;
+    }
+
+    function formatSubtitleOptionLabel(label, sourceType) {
+        var suffixMap = {
+            external: 'External',
+            hls: 'HLS',
+            embedded: 'Embedded'
+        };
+        var suffix = suffixMap[sourceType];
+        return suffix ? (label + ' (' + suffix + ')') : label;
+    }
+
+    function normalizeSubtitleIdentity(value) {
+        return String(value || '').trim().toLowerCase();
+    }
+
+    function isEmbeddedCaptionTrack(track) {
+        if (!track) {
+            return false;
+        }
+
+        var label = getSubtitleLabel(track.label || track.language, '');
+        return track.kind === 'captions' || /^cc\d+$/i.test(label) || getTextTrackSource(track) === 'embedded';
+    }
+
+    function domTextTrackMatchesHlsManifestTrack(track, manifestTrack) {
+        if (!track || !manifestTrack || isEmbeddedCaptionTrack(track)) {
+            return false;
+        }
+
+        var trackLabel = normalizeSubtitleIdentity(getSubtitleLabel(track.label || track.language, ''));
+        var trackLang = normalizeSubtitleIdentity(track.language);
+        var manifestLabel = normalizeSubtitleIdentity(getSubtitleLabel(manifestTrack.name || manifestTrack.lang, ''));
+        var manifestLang = normalizeSubtitleIdentity(manifestTrack.lang);
+
+        if (manifestLabel && trackLabel === manifestLabel) {
+            return true;
+        }
+
+        if (manifestLang && (trackLang === manifestLang || trackLabel === manifestLang)) {
+            return true;
+        }
+
+        return false;
+    }
+
+    function doesDomTextTrackMatchAnyHlsManifestTrack(track) {
+        if (!track || !hlsPlayer || !hlsPlayer.subtitleTracks) {
+            return false;
+        }
+
+        for (var i = 0; i < hlsPlayer.subtitleTracks.length; i++) {
+            if (domTextTrackMatchesHlsManifestTrack(track, hlsPlayer.subtitleTracks[i])) {
+                return true;
+            }
+        }
+
+        return false;
+    }
+
+    function findDomTextTrackIndex(matchFn) {
+        if (!video || !video.textTracks) {
+            return -1;
+        }
+
+        for (var i = 0; i < video.textTracks.length; i++) {
+            var track = video.textTracks[i];
+            var isTrackNode = false;
+            var trackNodes = video.querySelectorAll('track');
+            for (var j = 0; j < trackNodes.length; j++) {
+                if (trackNodes[j].track === track) {
+                    isTrackNode = true;
+                    break;
+                }
+            }
+            if (isTrackNode) {
+                continue;
+            }
+            if (matchFn(track, i)) {
+                return i;
+            }
+        }
+
+        return -1;
+    }
+
+    function getActiveHlsSubtitleIndex() {
+        if (typeof activeSubtitleValue !== 'string' || activeSubtitleValue.indexOf('hls:') !== 0) {
+            return -1;
+        }
+
+        var index = parseInt(activeSubtitleValue.split(':')[1], 10);
+        return isNaN(index) ? -1 : index;
+    }
+
+    function findMatchingHlsDomTextTrackIndex(hlsIndex) {
+        if (
+            !video ||
+            !video.textTracks ||
+            !hlsPlayer ||
+            !hlsPlayer.subtitleTracks ||
+            !hlsPlayer.subtitleTracks[hlsIndex]
+        ) {
+            return -1;
+        }
+
+        observeCurrentDomTextTracks('hls-match');
+
+        var selectedHlsTrack = hlsPlayer.subtitleTracks[hlsIndex];
+        var selectedLabel = getSubtitleLabel(selectedHlsTrack.name || selectedHlsTrack.lang, '').toLowerCase();
+        var selectedLang = String(selectedHlsTrack.lang || '').trim().toLowerCase();
+        var candidates = [];
+
+        for (var i = 0; i < video.textTracks.length; i++) {
+            var track = video.textTracks[i];
+            var isTrackNode = false;
+            var trackNodes = video.querySelectorAll('track');
+            for (var j = 0; j < trackNodes.length; j++) {
+                if (trackNodes[j].track === track) {
+                    isTrackNode = true;
+                    break;
+                }
+            }
+            if (isTrackNode) {
+                continue;
+            }
+            if (getTextTrackLoadId(track) !== activeLoadRequestId) {
+                continue;
+            }
+            if (track.kind !== 'subtitles') {
+                continue;
+            }
+            if (isEmbeddedCaptionTrack(track)) {
+                continue;
+            }
+
+            var meta = getTextTrackMeta(track);
+            candidates.push({
+                index: i,
+                sourceType: getTextTrackSource(track),
+                label: getSubtitleLabel(track.label || track.language, '').toLowerCase(),
+                lang: String(track.language || '').trim().toLowerCase(),
+                mode: track.mode,
+                sequence: meta ? meta.sequence : 0
+            });
+        }
+
+        if (!candidates.length) {
+            return -1;
+        }
+
+        var explicitHls = candidates.find(function(candidate) {
+            return candidate.sourceType === 'hls';
+        });
+        if (explicitHls) {
+            return explicitHls.index;
+        }
+
+        var matchingCandidates = candidates.filter(function(candidate) {
+            return (
+                (selectedLabel && candidate.label === selectedLabel) ||
+                (selectedLang && (candidate.lang === selectedLang || candidate.label === selectedLang))
+            );
+        });
+        if (matchingCandidates.length === 1) {
+            return matchingCandidates[0].index;
+        }
+        if (matchingCandidates.length > 1) {
+            matchingCandidates.sort(function(a, b) {
+                if (a.mode === 'showing' && b.mode !== 'showing') return -1;
+                if (b.mode === 'showing' && a.mode !== 'showing') return 1;
+                return b.sequence - a.sequence;
+            });
+            return matchingCandidates[0].index;
+        }
+
+        if (candidates.length === 1) {
+            return candidates[0].index;
+        }
+
+        var showingCandidate = candidates.find(function(candidate) {
+            return candidate.mode === 'showing';
+        });
+        if (showingCandidate) {
+            return showingCandidate.index;
+        }
+
+        candidates.sort(function(a, b) {
+            return b.sequence - a.sequence;
+        });
+        return candidates[0].index;
+    }
+
+    function syncActiveHlsSubtitleTrack(reason) {
+        var hlsIndex = getActiveHlsSubtitleIndex();
+        if (hlsIndex === -1 || !hlsPlayer || !hlsPlayer.subtitleTracks || !hlsPlayer.subtitleTracks[hlsIndex]) {
+            return;
+        }
+
+        hlsPlayer.subtitleDisplay = true;
+        if (hlsPlayer.subtitleTrack !== hlsIndex) {
+            hlsPlayer.subtitleTrack = hlsIndex;
+        }
+
+        var domTrackIndex = findMatchingHlsDomTextTrackIndex(hlsIndex);
+        if (domTrackIndex === -1 || !video.textTracks[domTrackIndex]) {
+            return;
+        }
+
+        for (var resetIndex = 0; resetIndex < video.textTracks.length; resetIndex++) {
+            if (resetIndex === domTrackIndex) {
+                continue;
+            }
+            if (getTextTrackLoadId(video.textTracks[resetIndex]) !== activeLoadRequestId) {
+                continue;
+            }
+            if (getTextTrackSource(video.textTracks[resetIndex]) === 'hls') {
+                setTextTrackSource(video.textTracks[resetIndex], 'unknown');
+            }
+        }
+        setTextTrackSource(video.textTracks[domTrackIndex], 'hls');
+
+        for (var i = 0; i < video.textTracks.length; i++) {
+            if (getTextTrackLoadId(video.textTracks[i]) !== activeLoadRequestId) {
+                continue;
+            }
+            if (video.textTracks[i].kind === 'subtitles') {
+                video.textTracks[i].mode = i === domTrackIndex ? 'showing' : 'disabled';
+            }
+        }
+
+    }
+
+    function getNativeSubtitleTracks() {
+        var combinedTracks = [];
+        var seen = {};
+        pruneTextTrackRegistry();
+        observeCurrentDomTextTracks('native-track-scan');
+
+        var channel = channels[currentChannelIndex];
+        if (channel && Array.isArray(channel.subtitles)) {
+            channel.subtitles.forEach(function(sub, index) {
+                var label = getSubtitleLabel(sub.label || sub.language, 'External ' + (index + 1));
+                var key = 'external|' + label.toLowerCase() + '|' + index;
+                if (!seen[key]) {
+                    seen[key] = true;
+                    combinedTracks.push({
+                        label: formatSubtitleOptionLabel(label, 'external'),
+                        value: 'external:' + index
+                    });
+                }
+            });
+        }
+
+        var domTracksList = [];
+        if (hlsPlayer && hlsPlayer.subtitleTracks) {
+            for (var m = 0; m < hlsPlayer.subtitleTracks.length; m++) {
+                var t = hlsPlayer.subtitleTracks[m];
+                var manifestLabel = getSubtitleLabel(t.name || t.lang, 'Track ' + (m + 1));
+                var manifestKey = manifestLabel.toLowerCase();
+                var hlsTrackKey = 'hls|' + manifestKey + '|' + m;
+                if (!seen[hlsTrackKey]) {
+                    seen[hlsTrackKey] = true;
+                    combinedTracks.push({
+                        label: formatSubtitleOptionLabel(manifestLabel, 'hls'),
+                        value: 'hls:' + m
+                    });
+                }
+            }
+        }
+
+        var isShakaActive = currentPlaybackEngine && currentPlaybackEngine.indexOf('shaka') !== -1;
+        var isHlsJsActive = currentPlaybackEngine && currentPlaybackEngine.indexOf('hls.js') !== -1;
+
+        if (video && video.textTracks) {
+            // Iterate backwards to bypass stale "ghost" tracks from previous streams
+            for (var i = video.textTracks.length - 1; i >= 0; i--) {
+                var vt = video.textTracks[i];
+                var isTrackNode = false;
+                var trackNodes = video.querySelectorAll('track');
+                for (var k = 0; k < trackNodes.length; k++) {
+                    if (trackNodes[k].track === vt) isTrackNode = true;
+                }
+                if (isTrackNode) continue;
+
+                if (vt.kind === 'subtitles' || vt.kind === 'captions') {
+                    var label = getSubtitleLabel(vt.label || vt.language, 'Track ' + (i + 1));
+                    var key = label.toLowerCase();
+                    var isCurrentLoadTrack = getTextTrackLoadId(vt) === activeLoadRequestId;
+                    var matchesHlsManifestTrack = doesDomTextTrackMatchAnyHlsManifestTrack(vt);
+                    var isEmbedded = isEmbeddedCaptionTrack(vt) || (isHlsJsActive && !matchesHlsManifestTrack);
+                    var isSelectableDomTrack = isCurrentLoadTrack && !matchesHlsManifestTrack && (
+                        isEmbedded ||
+                        isShakaActive
+                    );
+
+                    if (isSelectableDomTrack) {
+                        domTracksList.push({
+                            label: formatSubtitleOptionLabel(label, 'embedded'),
+                            value: 'html5:' + i,
+                            key: 'embedded|' + key + '|' + i
+                        });
+                    }
+                }
+            }
+        }
+
+        var deduplicatedDomTracks = [];
+        domTracksList.forEach(function(t) {
+            if (!seen[t.key]) {
+                seen[t.key] = true;
+                deduplicatedDomTracks.push(t);
+            }
+        });
+
+        deduplicatedDomTracks.reverse().forEach(function(t) {
+            combinedTracks.push({ label: t.label, value: t.value });
+        });
+
+        return combinedTracks;
+    }
+
+    function disableAllSubtitles() {
+        if (video && video.textTracks) {
+            for (var i = 0; i < video.textTracks.length; i++) {
+                video.textTracks[i].mode = 'disabled';
+            }
+        }
+        if (hlsPlayer) {
+            hlsPlayer.subtitleDisplay = false;
+            hlsPlayer.subtitleTrack = -1;
+        }
+        if (player) {
+            try { player.setTextTrackVisibility(false); } catch(e){}
+        }
+        activeSubtitleValue = 'Off';
+    }
+
+    function setSubtitleTrack(value) {
+        disableAllSubtitles();
+
+        var oldTracks = video.querySelectorAll('track');
+        oldTracks.forEach(function(t) { t.remove(); });
+
+        if (value === 'Off' || value === -1) {
+            return;
+        }
+
+        activeSubtitleValue = value;
+        var parts = String(value).split(':');
+        var type = parts[0];
+        var index = parseInt(parts[1], 10);
+
+        if (type === 'external') {
+            var channel = channels[currentChannelIndex];
+            if (channel && channel.subtitles && channel.subtitles[index]) {
+                var sub = channel.subtitles[index];
+                var track = document.createElement('track');
+                track.kind = 'subtitles';
+                track.label = sub.label || sub.language || ('External ' + (index + 1));
+                track.srclang = sub.language || 'en';
+                track.src = sub.url;
+                track.default = true;
+                video.appendChild(track);
+                if (track.track) {
+                    track.track.mode = 'showing';
+                }
+            }
+        } else if (type === 'hls' && hlsPlayer && hlsPlayer.subtitleTracks && hlsPlayer.subtitleTracks[index]) {
+            syncActiveHlsSubtitleTrack('user-selection');
+        } else if (type === 'html5' && video && video.textTracks[index]) {
+            setTextTrackSource(video.textTracks[index], 'embedded');
+            video.textTracks[index].mode = 'showing';
+        }
+    }
+
+    function getAvPlayAudioTracks() {
+        if (!hasAvPlay() || !webapis.avplay.getTotalTrackInfo) {
             return [];
         }
 
+        try {
+            return webapis.avplay.getTotalTrackInfo()
+                .filter(function(track) { return track.type === 'AUDIO'; })
+                .map(function(track, index) {
+                    var info = track.extra_info || '';
+                    var langMatch = /language=([^|]+)/i.exec(info);
+                    var nameMatch = /name=([^|]+)/i.exec(info);
+                    return {
+                        index: track.index,
+                        label: (nameMatch && nameMatch[1]) || (langMatch && langMatch[1]) || ('Track ' + (index + 1))
+                    };
+                });
+        } catch (error) {
+            return [];
+        }
+    }
+
+    function getAvPlaySelectedTrackIndex(type) {
+        if (!hasAvPlay() || !webapis.avplay.getCurrentStreamInfo) {
+            return -1;
+        }
+
+        try {
+            var info = webapis.avplay.getCurrentStreamInfo() || [];
+            var track = info.find(function(item) { return item.type === type; });
+            return track ? track.index : -1;
+        } catch (error) {
+            return -1;
+        }
+    }
+
+    function buildPlayerOptionItems() {
         var items = [];
+        var isHlsJs = currentPlaybackEngine === 'hls.js' || currentPlaybackEngine === 'hls.js-wrapper';
+        var isAvPlay = currentPlaybackEngine && currentPlaybackEngine.indexOf('avplay') === 0;
 
-        items.push({
-            type: 'quality',
-            title: 'Quality',
-            value: getCurrentQualityText(),
-            options: [{ label: 'Auto', value: -1 }].concat(hlsPlayer.levels.map(function(level, index) {
-                return {
-                    label: formatQualityLabel(level),
-                    value: index
-                };
-            }))
-        });
+        if (isHlsJs && hlsPlayer) {
+            items.push({
+                type: 'quality',
+                title: 'Quality',
+                value: getCurrentQualityText(),
+                options: [{ label: 'Auto', value: -1 }].concat(hlsPlayer.levels.map(function(level, index) {
+                    return {
+                        label: formatQualityLabel(level),
+                        value: index
+                    };
+                }))
+            });
+        }
 
-        if (hlsPlayer.audioTracks && hlsPlayer.audioTracks.length) {
+        if (isHlsJs && hlsPlayer && hlsPlayer.audioTracks && hlsPlayer.audioTracks.length) {
             items.push({
                 type: 'audio',
                 title: 'Audio',
@@ -648,7 +1398,65 @@ document.addEventListener('DOMContentLoaded', function() {
             });
         }
 
+        if (isAvPlay) {
+            var avPlayAudioTracks = getAvPlayAudioTracks();
+            if (avPlayAudioTracks.length) {
+                items.push({
+                    type: 'audio',
+                    title: 'Audio',
+                    value: getCurrentAudioText(),
+                    options: avPlayAudioTracks.map(function(track) {
+                        return {
+                            label: track.label,
+                            value: track.index
+                        };
+                    })
+                });
+            }
+        }
+
+        var selectableSubtitleTracks = getNativeSubtitleTracks();
+        if (selectableSubtitleTracks.length) {
+            items.push({
+                type: 'subtitle',
+                title: 'Subtitles',
+                value: getCurrentSubtitleText(),
+                options: [{ label: 'Off', value: 'Off' }].concat(selectableSubtitleTracks.map(function(track) {
+                    return {
+                        label: track.label,
+                        value: track.value
+                    };
+                }))
+            });
+        }
+
+        if (!items.length) {
+            return [];
+        }
+
         return items;
+    }
+
+    function schedulePlayerOptionsRefresh(reason) {
+        if (!isPlayerOptionsVisible) {
+            return;
+        }
+
+        if (playerOptionsRefreshTimer) {
+            clearTimeout(playerOptionsRefreshTimer);
+        }
+
+        playerOptionsRefreshTimer = setTimeout(function() {
+            playerOptionsRefreshTimer = null;
+            if (!isPlayerOptionsVisible) {
+                return;
+            }
+
+            renderPlayerOptions();
+            if (isPlayerOptionsDropdownVisible) {
+                renderPlayerOptionsDropdown();
+            }
+        }, 150);
     }
 
     function renderPlayerOptions() {
@@ -656,7 +1464,7 @@ document.addEventListener('DOMContentLoaded', function() {
         playerOptionsList.innerHTML = '';
 
         if (!playerOptionItems.length) {
-            playerOptionsHint.textContent = 'No HLS.js quality or audio controls are available for the current playback.';
+            playerOptionsHint.textContent = 'No player options are available for the current playback.';
         } else {
             playerOptionsHint.textContent = 'Select a row and press OK to open options. Back closes.';
         }
@@ -710,7 +1518,7 @@ document.addEventListener('DOMContentLoaded', function() {
     function openPlayerOptions() {
         renderPlayerOptions();
         if (!playerOptionItems.length) {
-            showChannelBanner('No HLS.js options for current stream');
+            showChannelBanner('No player options for current stream');
             return;
         }
         isPlayerOptionsVisible = true;
@@ -768,11 +1576,28 @@ document.addEventListener('DOMContentLoaded', function() {
             item.value = selectedOption.label;
         }
 
+        if (item.type === 'audio' && currentPlaybackEngine && currentPlaybackEngine.indexOf('avplay') === 0 && hasAvPlay()) {
+            try {
+                webapis.avplay.setSelectTrack('AUDIO', selectedOption.value);
+                item.value = selectedOption.label;
+            } catch (error) {
+                console.warn('AVPlay audio track switch failed:', error);
+            }
+        }
+
+        if (item.type === 'subtitle') {
+            setSubtitleTrack(selectedOption.value);
+            item.value = selectedOption.label;
+        }
+
         renderPlayerOptions();
         closePlayerOptionsDropdown();
     }
 
     function resetVideoElement() {
+        setAvPlayMode(false);
+        showHtmlVideoElement();
+        disableAllSubtitles();
         video.pause();
         video.removeAttribute('src');
         while (video.firstChild) {
@@ -885,16 +1710,72 @@ document.addEventListener('DOMContentLoaded', function() {
         });
     }
 
-    async function initPlayer() {
-        shaka.polyfill.installAll();
-        if (!shaka.Player.isBrowserSupported()) {
-            alert('Shaka Player is not supported on this device.');
+    function bindVideoTextTrackEvents() {
+        if (!video || !video.textTracks) {
             return;
         }
 
-        player = new shaka.Player();
+        video.textTracks.addEventListener('addtrack', function(event) {
+            registerTextTrack(event.track, activeLoadRequestId);
+            if (isEmbeddedCaptionTrack(event.track)) {
+                setTextTrackSource(event.track, 'embedded');
+            }
+            if (
+                event.track &&
+                event.track.kind === 'subtitles' &&
+                doesDomTextTrackMatchAnyHlsManifestTrack(event.track)
+            ) {
+                setTextTrackSource(event.track, 'hls');
+            }
+            if (activeSubtitleValue === 'Off' && event.track) {
+                event.track.mode = 'disabled';
+            }
+            if (getActiveHlsSubtitleIndex() !== -1) {
+                syncActiveHlsSubtitleTrack('dom-addtrack');
+            }
+            schedulePlayerOptionsRefresh('dom-addtrack');
+        });
+    }
+
+    async function attachPlayerToCurrentVideo() {
+        if (ui && typeof ui.destroy === 'function') {
+            try {
+                ui.destroy();
+            } catch (error) {
+                console.warn('Shaka UI destroy failed:', error);
+            }
+            ui = null;
+        }
+
         await player.attach(video);
 
+        ui = new shaka.ui.Overlay(player, videoContainer, video);
+        ui.configure({
+            controlPanelElements: ['play_pause', 'time_and_duration', 'spacer', 'language', 'fullscreen', 'overflow_menu']
+        });
+
+        bindVideoTextTrackEvents();
+    }
+
+    async function createFreshShakaPlayerInstance() {
+        if (ui && typeof ui.destroy === 'function') {
+            try {
+                ui.destroy();
+            } catch (error) {
+                console.warn('Shaka UI destroy failed:', error);
+            }
+            ui = null;
+        }
+
+        if (player && typeof player.destroy === 'function') {
+            try {
+                await player.destroy();
+            } catch (error) {
+                console.warn('Shaka player destroy failed:', error);
+            }
+        }
+
+        player = new shaka.Player();
         player.configure({
             streaming: {
                 gapDetectionThreshold: 0.5,
@@ -902,14 +1783,36 @@ document.addEventListener('DOMContentLoaded', function() {
             }
         });
 
-        ui = new shaka.ui.Overlay(player, videoContainer, video);
-        ui.configure({
-            controlPanelElements: ['play_pause', 'time_and_duration', 'spacer', 'language', 'fullscreen', 'overflow_menu']
-        });
-
         player.addEventListener('error', function(event) {
             console.error('Shaka Error:', event.detail);
         });
+
+        await attachPlayerToCurrentVideo();
+    }
+
+    async function recreateVideoElementForFreshSession() {
+        if (!video || !video.parentNode) {
+            return;
+        }
+
+        var newVideo = video.cloneNode(false);
+        newVideo.removeAttribute('src');
+        newVideo.load();
+        video.parentNode.replaceChild(newVideo, video);
+        video = newVideo;
+
+        setAvPlayMode(false);
+        showHtmlVideoElement();
+    }
+
+    async function initPlayer() {
+        shaka.polyfill.installAll();
+        if (!shaka.Player.isBrowserSupported()) {
+            alert('Shaka Player is not supported on this device.');
+            return;
+        }
+
+        await createFreshShakaPlayerInstance();
 
         registerRemoteKeys();
         loadSavedPlaylists();
@@ -939,8 +1842,7 @@ document.addEventListener('DOMContentLoaded', function() {
             return false;
         }
 
-        console.log('Trying Hls.js playback:', channelUrl);
-
+        stopAvPlay();
         destroyHlsPlayer();
 
         try {
@@ -968,7 +1870,28 @@ document.addEventListener('DOMContentLoaded', function() {
 
             hlsPlayer = new Hls({
                 enableWorker: true,
-                lowLatencyMode: false
+                lowLatencyMode: false,
+                renderTextTracksNatively: true,
+                enableWebVTT: true
+            });
+
+            hlsPlayer.on(Hls.Events.SUBTITLE_TRACKS_UPDATED, function(eventName, data) {
+                schedulePlayerOptionsRefresh('hls-tracks-updated');
+            });
+
+            hlsPlayer.on(Hls.Events.SUBTITLE_TRACK_SWITCH, function(eventName, data) {
+                syncActiveHlsSubtitleTrack('hls-switch');
+                schedulePlayerOptionsRefresh('hls-switch');
+            });
+
+            hlsPlayer.on(Hls.Events.SUBTITLE_TRACK_LOADED, function(eventName, data) {
+                syncActiveHlsSubtitleTrack('hls-track-loaded');
+                schedulePlayerOptionsRefresh('hls-track-loaded');
+            });
+
+            hlsPlayer.on(Hls.Events.CUES_PARSED, function(eventName, data) {
+                syncActiveHlsSubtitleTrack('hls-cues-parsed');
+                schedulePlayerOptionsRefresh('hls-cues-parsed');
             });
 
             hlsPlayer.on(Hls.Events.MANIFEST_PARSED, function() {
@@ -976,17 +1899,18 @@ document.addEventListener('DOMContentLoaded', function() {
                     finish(false);
                     return;
                 }
+                disableAllSubtitles();
+                schedulePlayerOptionsRefresh('hls-manifest-parsed');
                 video.play().then(function() {
                     finish(true);
                 }).catch(function(error) {
-                    console.warn('Hls.js video.play failed:', error);
                     finish(false);
                 });
             });
 
             hlsPlayer.on(Hls.Events.ERROR, function(eventName, data) {
-                console.warn('Hls.js error:', eventName, data);
                 if (data && data.fatal) {
+                    console.warn('Hls.js fatal error:', eventName, data);
                     finish(false);
                 }
             });
@@ -1001,9 +1925,142 @@ document.addEventListener('DOMContentLoaded', function() {
         });
     }
 
+    async function tryAvPlayPlayback(channelUrl, requestId, streamType) {
+        if (!hasAvPlay()) {
+            return false;
+        }
+
+        async function prepareForAvPlayAttempt() {
+            stopAvPlay();
+            destroyHlsPlayer();
+
+            try {
+                await player.unload();
+            } catch (error) {
+                console.warn('Shaka unload before AVPlay playback failed:', error);
+            }
+
+            resetVideoElement();
+            hideHtmlVideoElement();
+            setAvPlayMode(true);
+        }
+
+        async function runAvPlayAttempt(attemptIndex) {
+            await prepareForAvPlayAttempt();
+
+            return await new Promise(function(resolve) {
+                var settled = false;
+                var lastAvPlayError = null;
+
+                function finish(result) {
+                    if (settled) {
+                        return;
+                    }
+                    settled = true;
+                    resolve(result);
+                }
+
+                function buildFailureResult() {
+                    return {
+                        success: false,
+                        error: lastAvPlayError
+                    };
+                }
+
+                function shouldRetryForError(errorValue) {
+                    return attemptIndex === 0 && errorValue === 'PLAYER_ERROR_CONNECTION_FAILED';
+                }
+
+                function failAttempt(errorValue) {
+                    lastAvPlayError = errorValue || lastAvPlayError;
+                    stopAvPlay();
+                    if (shouldRetryForError(lastAvPlayError)) {
+                        console.warn('AVPlay retrying after transient failure:', lastAvPlayError);
+                    }
+                    finish(buildFailureResult());
+                }
+
+                if (isStaleLoad(requestId)) {
+                    stopAvPlay();
+                    finish(buildFailureResult());
+                    return;
+                }
+
+                try {
+                    webapis.avplay.open(channelUrl);
+                    avPlayState = 'IDLE';
+
+                    try {
+                        webapis.avplay.setTimeoutForBuffering(4);
+                        webapis.avplay.setBufferingParam('PLAYER_BUFFER_FOR_PLAY', 'PLAYER_BUFFER_SIZE_IN_SECOND', 4);
+                        webapis.avplay.setBufferingParam('PLAYER_BUFFER_FOR_RESUME', 'PLAYER_BUFFER_SIZE_IN_SECOND', 4);
+                        if (streamType === 'hls') {
+                            webapis.avplay.setStreamingProperty('USER_AGENT', navigator.userAgent || 'Mozilla/5.0');
+                            webapis.avplay.setStreamingProperty('ADAPTIVE_INFO', 'STARTBITRATE=LOWEST|FIXED_MAX_RESOLUTION=3840X2160');
+                        }
+                    } catch (bufferingError) {
+                        console.warn('AVPlay streaming config failed:', bufferingError);
+                    }
+                webapis.avplay.setListener({
+                    onbufferingstart: function() {},
+                    onbufferingprogress: function() {},
+                    onbufferingcomplete: function() {},
+                    oncurrentplaytime: function() {},
+                    onsubtitlechange: function() {},
+                    onstreamcompleted: function() {},
+                    onerror: function(eventType) {
+                        console.warn('AVPlay error:', eventType);
+                        failAttempt(eventType);
+                        }
+                    });
+                    updateAvPlayDisplayRect();
+                    webapis.avplay.setDisplayMethod('PLAYER_DISPLAY_MODE_FULL_SCREEN');
+                    webapis.avplay.prepareAsync(function() {
+                        avPlayState = 'READY';
+                        try {
+                            setAvPlayMode(true);
+                            updateAvPlayDisplayRect();
+                            webapis.avplay.play();
+                            avPlayState = 'PLAYING';
+                            if (isPlayerOptionsVisible && !isPlayerOptionsDropdownVisible) {
+                                renderPlayerOptions();
+                            }
+                            finish({ success: true });
+                        } catch (error) {
+                            console.warn('AVPlay play failed:', error);
+                            failAttempt(error && error.message);
+                        }
+                    }, function(error) {
+                        console.warn('AVPlay prepareAsync failed:', error);
+                        failAttempt(error && error.message);
+                    });
+                } catch (error) {
+                    console.warn('AVPlay attach/load failed:', error);
+                    failAttempt(error && error.message);
+                }
+            });
+        }
+
+        var firstAttempt = await runAvPlayAttempt(0);
+        if (firstAttempt.success) {
+            return true;
+        }
+        if (isStaleLoad(requestId)) {
+            return false;
+        }
+        if (firstAttempt.error !== 'PLAYER_ERROR_CONNECTION_FAILED') {
+            return false;
+        }
+
+        var secondAttempt = await runAvPlayAttempt(1);
+        return secondAttempt.success;
+    }
+
     async function playWithBestEngine(channelUrl, requestId) {
         var streamType = getStreamType(channelUrl);
+        var manifestMimeType = getManifestMimeType(channelUrl);
 
+        stopAvPlay();
         destroyHlsPlayer();
         resetVideoElement();
 
@@ -1012,6 +2069,31 @@ document.addEventListener('DOMContentLoaded', function() {
         }
 
         if (streamType === 'hls') {
+            var hlsHasSubtitleMetadata = await detectHlsSubtitleMetadata(channelUrl);
+            if (isStaleLoad(requestId)) {
+                throw new Error('Stale playback request');
+            }
+            if (hlsHasSubtitleMetadata) {
+                var subtitleFirstHlsJsWorked = await tryHlsJsPlayback(channelUrl, requestId);
+                if (subtitleFirstHlsJsWorked) {
+                    return 'hls.js';
+                }
+
+                if (isStaleLoad(requestId)) {
+                    throw new Error('Stale playback request');
+                }
+                console.warn('Playback fallback: Hls.js -> AVPlay', channelUrl);
+            }
+
+            var avPlayHlsWorked = await tryAvPlayPlayback(channelUrl, requestId, streamType);
+            if (avPlayHlsWorked) {
+                return 'avplay-hls';
+            }
+
+            if (isStaleLoad(requestId)) {
+                throw new Error('Stale playback request');
+            }
+            console.warn('Playback fallback: AVPlay -> Hls.js', channelUrl);
             var hlsJsWorked = await tryHlsJsPlayback(channelUrl, requestId);
             if (hlsJsWorked) {
                 return 'hls.js';
@@ -1020,15 +2102,56 @@ document.addEventListener('DOMContentLoaded', function() {
             if (isStaleLoad(requestId)) {
                 throw new Error('Stale playback request');
             }
-            var hlsMimeType = getManifestMimeType(channelUrl);
-            await player.load(channelUrl, null, hlsMimeType);
+            console.warn('Playback fallback: Hls.js -> Shaka', channelUrl);
+            await player.load(channelUrl, null, manifestMimeType);
             return 'shaka-hls-fallback';
+        }
+
+        if (streamType === 'hls-wrapper') {
+            var wrappedHlsJsWorked = await tryHlsJsPlayback(channelUrl, requestId);
+            if (wrappedHlsJsWorked) {
+                return 'hls.js-wrapper';
+            }
+
+            if (isStaleLoad(requestId)) {
+                throw new Error('Stale playback request');
+            }
+            console.warn('Playback fallback: Hls.js -> Shaka', channelUrl);
+            await player.load(channelUrl, null, manifestMimeType);
+            return 'shaka-hls-wrapper-fallback';
+        }
+
+        if (streamType === 'hls-stitch') {
+            var stitchedHlsJsWorked = await tryHlsJsPlayback(channelUrl, requestId);
+            if (stitchedHlsJsWorked) {
+                return 'hls.js-stitch';
+            }
+
+            if (isStaleLoad(requestId)) {
+                throw new Error('Stale playback request');
+            }
+            console.warn('Playback fallback: Hls.js -> Shaka', channelUrl);
+            await player.load(channelUrl, null, manifestMimeType);
+            return 'shaka-hls-stitch-fallback';
+        }
+
+        if (streamType === 'mpegts') {
+            var avPlayWorked = await tryAvPlayPlayback(channelUrl, requestId, streamType);
+            if (avPlayWorked) {
+                return 'avplay';
+            }
+
+            if (isStaleLoad(requestId)) {
+                throw new Error('Stale playback request');
+            }
+            console.warn('Playback fallback: AVPlay -> Shaka', channelUrl);
+            await player.load(channelUrl, null, manifestMimeType);
+            return 'shaka-mpegts-fallback';
         }
 
         if (isStaleLoad(requestId)) {
             throw new Error('Stale playback request');
         }
-        var manifestMimeType = getManifestMimeType(channelUrl);
         await player.load(channelUrl, null, manifestMimeType);
         return 'shaka';
     }
@@ -1054,11 +2177,20 @@ document.addEventListener('DOMContentLoaded', function() {
         }
 
         var requestId = ++activeLoadRequestId;
+        var useFreshSubtitleSession = useFreshSubtitleSessionOnNextPlaybackStart;
+        if (useFreshSubtitleSession) {
+            resetSubtitleTrackingState();
+        } else {
+            captureInitialTextTracksForLoad();
+            markExistingTextTracksAsStale(requestId);
+        }
         isChannelLoading = true;
-        var channelUrl = channels[index].url;
+        var channel = channels[index];
+        disableAllSubtitles();
+        var oldTracks = video.querySelectorAll('track');
+        oldTracks.forEach(function(t) { t.remove(); });
+        var channelUrl = channel.url;
         var streamType = getStreamType(channelUrl);
-
-        console.log('Loading:', channels[index].name, channelUrl, streamType);
         try {
             var playbackEngine = await playWithBestEngine(channelUrl, requestId);
             if (isStaleLoad(requestId)) {
@@ -1067,9 +2199,9 @@ document.addEventListener('DOMContentLoaded', function() {
             currentPlaybackEngine = playbackEngine;
             currentChannelIndex = index;
             focusedChannelIndex = index;
+            useFreshSubtitleSessionOnNextPlaybackStart = false;
             isListVisible = false;
             channelList.classList.add('hidden');
-            console.log('Playback engine:', playbackEngine);
             showChannelBanner((currentPlaylist ? currentPlaylist.name + ' | ' : '') + channels[index].name);
         } catch (e) {
             if (isStaleLoad(requestId)) {
@@ -1123,6 +2255,7 @@ document.addEventListener('DOMContentLoaded', function() {
         focusedChannelIndex = 0;
         isListVisible = false;
         currentPlaybackEngine = null;
+        useFreshSubtitleSessionOnNextPlaybackStart = true;
         channelList.classList.add('hidden');
         closePlayerOptions();
         closeSearch();
@@ -1133,8 +2266,16 @@ document.addEventListener('DOMContentLoaded', function() {
             console.warn('Player unload failed:', error);
         }
 
+        stopAvPlay();
         destroyHlsPlayer();
         resetVideoElement();
+        resetSubtitleTrackingState();
+        try {
+            await recreateVideoElementForFreshSession();
+            await createFreshShakaPlayerInstance();
+        } catch (error) {
+            console.warn('Video element refresh failed:', error);
+        }
 
         setScreen('home');
     }
@@ -1477,6 +2618,10 @@ document.addEventListener('DOMContentLoaded', function() {
         if (keyCode === 428 && channels.length && !isChannelLoading) {
             loadChannel((currentChannelIndex - 1 + channels.length) % channels.length);
         }
+    });
+
+    window.addEventListener('resize', function() {
+        updateAvPlayDisplayRect();
     });
 
     initPlayer();

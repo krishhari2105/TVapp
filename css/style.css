@@ -10,6 +10,10 @@ body {
     font-family: "Segoe UI", sans-serif;
 }
 
+body.avplay-active {
+    background: transparent;
+}
+
 .hidden {
     display: none !important;
 }
@@ -178,9 +182,50 @@ video::-webkit-media-controls-fullscreen-button {
     background: #000;
 }
 
+#videoContainer.avplay-active {
+    background: transparent;
+}
+
 #videoPlayer {
     position: relative;
     z-index: 1;
+}
+
+#subtitleOverlay {
+    position: fixed;
+    bottom: 140px;
+    left: 0;
+    width: 100%;
+    z-index: 9999;
+    pointer-events: none;
+    text-align: center;
+    font-size: 48px;
+    font-weight: 400;
+    color: #fff;
+    white-space: pre-line;
+    display: block;
+}
+
+body.overlay-subs-active video::cue {
+    opacity: 0;
+}
+
+body.overlay-subs-active video::-webkit-media-text-track-display {
+    display: none !important;
+}
+
+body.avplay-active #videoPlayer,
+body.avplay-active .shaka-video-container,
+body.avplay-active .shaka-text-container,
+body.avplay-active .shaka-controls-container,
+body.avplay-active .shaka-play-button-container,
+body.avplay-active .shaka-spinner-container,
+body.avplay-active .shaka-bottom-controls,
+body.avplay-active .shaka-overflow-menu,
+body.avplay-active .shaka-settings-menu {
+    opacity: 0 !important;
+    visibility: hidden !important;
+    pointer-events: none !important;
 }
 
 #channelList {
