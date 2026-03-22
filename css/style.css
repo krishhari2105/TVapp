@@ -245,6 +245,163 @@ body.avplay-active .shaka-settings-menu {
     transform: translateX(100%);
 }
 
+#channelBanner {
+    position: fixed;
+    left: 36px;
+    right: 36px;
+    bottom: 28px;
+    z-index: 1500;
+    pointer-events: none;
+}
+
+.channel-banner-content,
+.channel-banner-message {
+    border-radius: 28px;
+    border: 1px solid rgba(255, 255, 255, 0.12);
+    background:
+        linear-gradient(180deg, rgba(9, 20, 36, 0.96) 0%, rgba(4, 10, 20, 0.92) 100%),
+        linear-gradient(90deg, rgba(30, 180, 255, 0.14), rgba(255, 255, 255, 0));
+    box-shadow: 0 24px 60px rgba(0, 0, 0, 0.42);
+    backdrop-filter: blur(18px);
+}
+
+.channel-banner-content {
+    padding: 22px 28px 20px;
+}
+
+.channel-banner-message {
+    min-height: 84px;
+    padding: 22px 28px;
+    box-sizing: border-box;
+    display: flex;
+    align-items: center;
+    font-size: 31px;
+    font-weight: 700;
+    line-height: 1.25;
+}
+
+.channel-banner-top {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 24px;
+}
+
+.channel-banner-brand {
+    min-width: 0;
+    display: flex;
+    align-items: center;
+    gap: 20px;
+}
+
+.channel-banner-logo-box {
+    width: 94px;
+    height: 94px;
+    flex-shrink: 0;
+    overflow: hidden;
+    border-radius: 22px;
+    background: rgba(255, 255, 255, 0.96);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+}
+
+.channel-banner-logo {
+    width: 100%;
+    height: 100%;
+    object-fit: contain;
+    background: #fff;
+}
+
+.channel-banner-logo-fallback {
+    padding: 12px;
+    box-sizing: border-box;
+    text-align: center;
+    font-size: 28px;
+    font-weight: 800;
+    line-height: 1;
+    letter-spacing: 0.08em;
+    color: #07111f;
+}
+
+.channel-banner-name-block {
+    min-width: 0;
+}
+
+.channel-banner-name {
+    font-size: 38px;
+    font-weight: 700;
+    line-height: 1.12;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+}
+
+.channel-banner-clock {
+    flex-shrink: 0;
+    font-size: 32px;
+    font-weight: 700;
+    letter-spacing: 0.04em;
+}
+
+.channel-banner-program-row {
+    margin-top: 18px;
+    display: flex;
+    align-items: flex-end;
+    justify-content: space-between;
+    gap: 18px;
+}
+
+.channel-banner-program-copy {
+    min-width: 0;
+}
+
+.channel-banner-program-title {
+    font-size: 26px;
+    font-weight: 600;
+    line-height: 1.25;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+}
+
+.channel-banner-program-meta {
+    margin-top: 6px;
+    font-size: 18px;
+    color: rgba(255, 255, 255, 0.72);
+}
+
+.channel-banner-program-remaining {
+    flex-shrink: 0;
+    font-size: 18px;
+    font-weight: 700;
+    color: #7bd9ff;
+}
+
+.channel-banner-progress-track {
+    margin-top: 14px;
+    height: 8px;
+    overflow: hidden;
+    border-radius: 999px;
+    background: rgba(255, 255, 255, 0.12);
+}
+
+.channel-banner-progress-fill {
+    width: 0;
+    height: 100%;
+    border-radius: inherit;
+    background: linear-gradient(90deg, #21b9ff 0%, #5cf6ff 100%);
+}
+
+.channel-banner-next {
+    margin-top: 12px;
+    font-size: 18px;
+    color: rgba(255, 255, 255, 0.72);
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+}
+
 #listContainer {
     list-style: none;
     padding: 20px;
