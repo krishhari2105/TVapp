@@ -77,24 +77,14 @@ document.addEventListener('DOMContentLoaded', function() {
     var DEFAULT_PLAYLISTS = [
         {
             id: createId(),
-            name: 'playlist.php',
-            url: 'http://192.168.1.3:8080/JioTv/playlist.php'
-        },
-        {
-            id: createId(),
             name: 'play',
-            url: 'http://192.168.1.3:8080/play.m3u'
+            url: 'https://stream.hk.frii.site/play.m3u'
         },
         {
             id: createId(),
             name: 'strms',
-            url: 'http://192.168.1.3:8080/strms.m3u'
+            url: 'https://stream.hk.frii.site/strms.m3u'
         },
-        {
-            id: createId(),
-            name: 'tam',
-            url: 'https://iptv-org.github.io/iptv/languages/tam.m3u'
-        }
     ];
 
     function createId() {
@@ -1218,6 +1208,32 @@ document.addEventListener('DOMContentLoaded', function() {
         return undefined;
     }
 
+    function getNormalizedContentType(contentType) {
+        return String(contentType || '').split(';')[0].trim().toLowerCase();
+    }
+
+    function getManifestMimeTypeFromContentType(contentType) {
+        var normalizedContentType = getNormalizedContentType(contentType);
+        if (
+            normalizedContentType === 'application/vnd.apple.mpegurl' ||
+            normalizedContentType === 'application/x-mpegurl' ||
+            normalizedContentType === 'audio/mpegurl' ||
+            normalizedContentType === 'audio/x-mpegurl'
+        ) {
+            return 'application/x-mpegurl';
+        }
+        if (normalizedContentType === 'application/dash+xml') {
+            return 'application/dash+xml';
+        }
+        if (
+            normalizedContentType === 'video/mp2t' ||
+            normalizedContentType === 'video/vnd.dlna.mpeg-tts'
+        ) {
+            return 'video/mp2t';
+        }
+        return undefined;
+    }
+
     function getStreamType(url) {
         var normalizedUrl = String(url || '').toLowerCase();
         if (
@@ -1244,6 +1260,145 @@ document.addEventListener('DOMContentLoaded', function() {
             return 'mpegts';
         }
         return 'unknown';
+    }
+
+    function getStreamTypeFromContentType(contentType) {
+        var manifestMimeType = getManifestMimeTypeFromContentType(contentType);
+        if (manifestMimeType === 'application/x-mpegurl') {
+            return 'hls';
+        }
+        if (manifestMimeType === 'application/dash+xml') {
+            return 'dash';
+        }
+        if (manifestMimeType === 'video/mp2t') {
+            return 'mpegts';
+        }
+        return 'unknown';
+    }
+
+    function closeInspectionResponse(response) {
+        if (!response || !response.body || typeof response.body.cancel !== 'function') {
+            return;
+        }
+
+        try {
+            var cancelPromise = response.body.cancel();
+            if (cancelPromise && typeof cancelPromise.catch === 'function') {
+                cancelPromise.catch(function() {});
+            }
+        } catch (error) {
+            console.warn('Response cleanup failed:', error);
+        }
+    }
+
+    async function fetchWithTimeout(url, options, timeoutMs) {
+        var fetchOptions = options || {};
+        var timeoutId = null;
+        var controller = typeof AbortController === 'function' ? new AbortController() : null;
+
+        if (controller) {
+            fetchOptions = Object.assign({}, fetchOptions, {
+                signal: controller.signal
+            });
+        }
+
+        var fetchPromise = fetch(url, fetchOptions);
+        var timeoutPromise = new Promise(function(resolve, reject) {
+            timeoutId = setTimeout(function() {
+                if (controller) {
+                    try {
+                        controller.abort();
+                    } catch (error) {
+                        console.warn('Inspection abort failed:', error);
+                    }
+                }
+                reject(new Error('Playback URL inspection timed out'));
+            }, timeoutMs);
+        });
+
+        try {
+            return await Promise.race([fetchPromise, timeoutPromise]);
+        } finally {
+            if (timeoutId) {
+                clearTimeout(timeoutId);
+            }
+        }
+    }
+
+    async function inspectPlaybackUrl(url, method) {
+        var response = await fetchWithTimeout(url, {
+            method: method,
+            cache: 'no-store'
+        }, 4000);
+        var resolvedUrl = response.url || url;
+        var contentType = response.headers && typeof response.headers.get === 'function'
+            ? response.headers.get('content-type')
+            : '';
+        var resolvedStreamType = getStreamType(resolvedUrl);
+        var resolvedMimeType = getManifestMimeType(resolvedUrl);
+
+        if (resolvedStreamType === 'unknown') {
+            resolvedStreamType = getStreamTypeFromContentType(contentType);
+        }
+
+        if (!resolvedMimeType) {
+            resolvedMimeType = getManifestMimeTypeFromContentType(contentType);
+        }
+
+        closeInspectionResponse(response);
+
+        return {
+            url: resolvedUrl,
+            streamType: resolvedStreamType,
+            manifestMimeType: resolvedMimeType
+        };
+    }
+
+    async function resolveChannelPlaybackTarget(channel) {
+        var channelUrl = channel && channel.url ? String(channel.url).trim() : '';
+        var streamType = getStreamType(channelUrl);
+        var manifestMimeType = getManifestMimeType(channelUrl);
+
+        if (!channelUrl || streamType !== 'unknown' || manifestMimeType) {
+            return {
+                url: channelUrl,
+                originalUrl: channelUrl,
+                resolvedUrl: channelUrl,
+                streamType: streamType,
+                manifestMimeType: manifestMimeType
+            };
+        }
+
+        var methods = ['GET'];
+
+        for (var i = 0; i < methods.length; i++) {
+            try {
+                var inspectedTarget = await inspectPlaybackUrl(channelUrl, methods[i]);
+                if (
+                    inspectedTarget.streamType !== 'unknown' ||
+                    inspectedTarget.manifestMimeType ||
+                    inspectedTarget.url !== channelUrl
+                ) {
+                    return {
+                        url: channelUrl,
+                        originalUrl: channelUrl,
+                        resolvedUrl: inspectedTarget.url,
+                        streamType: inspectedTarget.streamType,
+                        manifestMimeType: inspectedTarget.manifestMimeType
+                    };
+                }
+            } catch (error) {
+                console.warn('Channel URL inspection failed:', channelUrl, methods[i], error);
+            }
+        }
+
+        return {
+            url: channelUrl,
+            originalUrl: channelUrl,
+            resolvedUrl: channelUrl,
+            streamType: streamType,
+            manifestMimeType: manifestMimeType
+        };
     }
 
     async function detectHlsSubtitleMetadata(channelUrl) {
@@ -2660,12 +2815,18 @@ document.addEventListener('DOMContentLoaded', function() {
             return await new Promise(function(resolve) {
                 var settled = false;
                 var lastAvPlayError = null;
+                var hasPlaybackStarted = false;
+                var playbackStartTimeoutId = null;
 
                 function finish(result) {
                     if (settled) {
                         return;
                     }
                     settled = true;
+                    if (playbackStartTimeoutId) {
+                        clearTimeout(playbackStartTimeoutId);
+                        playbackStartTimeoutId = null;
+                    }
                     resolve(result);
                 }
 
@@ -2682,6 +2843,12 @@ document.addEventListener('DOMContentLoaded', function() {
 
                 function failAttempt(errorValue) {
                     lastAvPlayError = errorValue || lastAvPlayError;
+
+                    if (hasPlaybackStarted && lastAvPlayError === 'PLAYER_ERROR_INVALID_OPERATION') {
+                        console.warn('Ignoring post-start AVPlay invalid operation:', lastAvPlayError);
+                        return;
+                    }
+
                     stopAvPlay();
                     if (shouldRetryForError(lastAvPlayError)) {
                         console.warn('AVPlay retrying after transient failure:', lastAvPlayError);
@@ -2714,7 +2881,18 @@ document.addEventListener('DOMContentLoaded', function() {
                     onbufferingstart: function() {},
                     onbufferingprogress: function() {},
                     onbufferingcomplete: function() {},
-                    oncurrentplaytime: function() {},
+                    oncurrentplaytime: function() {
+                        if (hasPlaybackStarted) {
+                            return;
+                        }
+
+                        hasPlaybackStarted = true;
+                        avPlayState = 'PLAYING';
+                        if (isPlayerOptionsVisible && !isPlayerOptionsDropdownVisible) {
+                            renderPlayerOptions();
+                        }
+                        finish({ success: true });
+                    },
                     onsubtitlechange: function() {},
                     onstreamcompleted: function() {},
                     onerror: function(eventType) {
@@ -2730,11 +2908,9 @@ document.addEventListener('DOMContentLoaded', function() {
                             setAvPlayMode(true);
                             updateAvPlayDisplayRect();
                             webapis.avplay.play();
-                            avPlayState = 'PLAYING';
-                            if (isPlayerOptionsVisible && !isPlayerOptionsDropdownVisible) {
-                                renderPlayerOptions();
-                            }
-                            finish({ success: true });
+                            playbackStartTimeoutId = setTimeout(function() {
+                                failAttempt('PLAYER_ERROR_PLAYBACK_TIMEOUT');
+                            }, 8000);
                         } catch (error) {
                             console.warn('AVPlay play failed:', error);
                             failAttempt(error && error.message);
@@ -2765,10 +2941,13 @@ document.addEventListener('DOMContentLoaded', function() {
         return secondAttempt.success;
     }
 
-    async function playWithBestEngine(channelUrl, requestId) {
-        var streamType = getStreamType(channelUrl);
-        var manifestMimeType = getManifestMimeType(channelUrl);
-        var engineOverride = getPlayerEngineOverride(channelUrl);
+    async function playWithBestEngine(channelUrl, requestId, playbackTarget) {
+        playbackTarget = playbackTarget || {};
+
+        var streamType = playbackTarget.streamType || getStreamType(channelUrl);
+        var manifestMimeType = playbackTarget.manifestMimeType || getManifestMimeType(channelUrl);
+        var engineOverride = getPlayerEngineOverride(playbackTarget.originalUrl || channelUrl);
+        var avPlayUrl = playbackTarget.resolvedUrl || channelUrl;
 
         stopAvPlay();
         destroyHlsPlayer();
@@ -2780,7 +2959,7 @@ document.addEventListener('DOMContentLoaded', function() {
 
         if (engineOverride !== 'auto') {
             if (engineOverride === 'avplay' && (streamType === 'hls' || streamType === 'mpegts')) {
-                var forcedAvPlayWorked = await tryAvPlayPlayback(channelUrl, requestId, streamType);
+                var forcedAvPlayWorked = await tryAvPlayPlayback(avPlayUrl, requestId, streamType);
                 if (forcedAvPlayWorked) {
                     return streamType === 'mpegts' ? 'avplay' : 'avplay-hls';
                 }
@@ -2824,7 +3003,7 @@ document.addEventListener('DOMContentLoaded', function() {
                 console.warn('Playback fallback: Hls.js -> AVPlay', channelUrl);
             }
 
-            var avPlayHlsWorked = await tryAvPlayPlayback(channelUrl, requestId, streamType);
+            var avPlayHlsWorked = await tryAvPlayPlayback(avPlayUrl, requestId, streamType);
             if (avPlayHlsWorked) {
                 return 'avplay-hls';
             }
@@ -2875,7 +3054,7 @@ document.addEventListener('DOMContentLoaded', function() {
         }
 
         if (streamType === 'mpegts') {
-            var avPlayWorked = await tryAvPlayPlayback(channelUrl, requestId, streamType);
+            var avPlayWorked = await tryAvPlayPlayback(avPlayUrl, requestId, streamType);
             if (avPlayWorked) {
                 return 'avplay';
             }
@@ -2891,6 +3070,7 @@ document.addEventListener('DOMContentLoaded', function() {
         if (isStaleLoad(requestId)) {
             throw new Error('Stale playback request');
         }
+
         await player.load(channelUrl, null, manifestMimeType);
         return 'shaka';
     }
@@ -2929,10 +3109,13 @@ document.addEventListener('DOMContentLoaded', function() {
         disableAllSubtitles();
         var oldTracks = video.querySelectorAll('track');
         oldTracks.forEach(function(t) { t.remove(); });
+        var playbackTarget = await resolveChannelPlaybackTarget(channel);
+        if (isStaleLoad(requestId)) {
+            return;
+        }
         var channelUrl = channel.url;
-        var streamType = getStreamType(channelUrl);
         try {
-            var playbackEngine = await playWithBestEngine(channelUrl, requestId);
+            var playbackEngine = await playWithBestEngine(channelUrl, requestId, playbackTarget);
             if (isStaleLoad(requestId)) {
                 return;
             }
